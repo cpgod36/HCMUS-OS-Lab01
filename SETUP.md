@@ -9,7 +9,7 @@
 |---|---|---|---|---|---|
 | Phan Chí Cao (**nhóm trưởng**) | 24120026 | `cpgod36` | `cao` | sleep, pingpong, primes + gộp code, nộp bài, report | `user/sleep.c`, `user/pingpong.c`, `user/primes.c` |
 | Võ Phùng Nhật Long | 24120088 | `nhlcngdz` | `long` | **cp, diff** | `user/cp.c`, `user/diff.c` |
-| Nguyễn Hoàng Nhật | 24120110 | `nh996` | `nhat` | **tree, du** | `user/tree.c`, `user/du.c` |
+| Nguyễn Hoàng Nhật | 24120110 | `nh-996` | `nhat` | **tree, du** | `user/tree.c`, `user/du.c` |
 
 Ngoài file của mình, mỗi người chỉ được sửa **đúng dòng `UPROGS` của mình trong `Makefile`** (xem mục 4.2).
 
