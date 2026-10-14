@@ -10,8 +10,8 @@ int
 readline(int fd, char *buf, int max)
 {
   int i = 0;
-  int n;
-  char c;
+  int n = 0;
+  char c = 0;
 
   while(i < max - 1){
     n = read(fd, &c, 1);
@@ -27,6 +27,15 @@ readline(int fd, char *buf, int max)
     buf[i++] = c;
   }
   buf[i] = '\0';
+
+  /* Neu dong dai hon max - 1, doc xa bo phan con lai den '\n' de khong lech so dong */
+  if(c != '\n' && n > 0){
+    while((n = read(fd, &c, 1)) > 0 && c != '\n')
+      ;
+    if(n < 0)
+      return -1;
+  }
+
   return 1;
 }
 

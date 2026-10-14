@@ -9,6 +9,7 @@ int
 main(int argc, char *argv[])
 {
   int src_fd, dst_fd;
+  struct stat s1, s2;
   int n;
 
   if(argc != 3){
@@ -18,6 +19,18 @@ main(int argc, char *argv[])
 
   if((src_fd = open(argv[1], O_RDONLY)) < 0){
     fprintf(2, "cp: cannot open %s\n", argv[1]);
+    exit(1);
+  }
+
+  if(fstat(src_fd, &s1) < 0){
+    fprintf(2, "cp: cannot stat %s\n", argv[1]);
+    close(src_fd);
+    exit(1);
+  }
+
+  if(stat(argv[2], &s2) == 0 && s1.dev == s2.dev && s1.ino == s2.ino){
+    fprintf(2, "cp: %s and %s are the same file\n", argv[1], argv[2]);
+    close(src_fd);
     exit(1);
   }
 
