@@ -3,6 +3,7 @@
 #include "user/user.h"
 #include "kernel/fs.h"
 #include "kernel/fcntl.h"
+#include "kernel/param.h"
 
 #define MAX_ENTRIES 128
 
@@ -13,56 +14,66 @@ struct entry_info {
   uint64 size;
 };
 
-// Safely joins a directory prefix and entry name: dst = prefix + "/" + name.
-// Returns 0 on success, or -1 if the combined path is too long.
-static int
-join_path(char *dst, int max_len, const char *prefix, const char *name)
-{
-  int plen = strlen(prefix);
-  int nlen = strlen(name);
-  int need_slash = (plen > 0 && prefix[plen - 1] != '/');
+// Global shared path buffer to save stack space.
+// xv6 user stack is only 8KB (or 4KB); keeping this global avoids stack overflow on deep trees.
+static char path_buf[MAXPATH];
 
-  if(plen + need_slash + nlen + 1 > max_len)
+// Temporary buffers used only during the non-recursive directory scan phase.
+// Moving them to static storage reduces each recursive stack frame to ~48 bytes.
+static struct stat g_st;
+static struct stat g_subst;
+static struct dirent g_de;
+static char g_name[DIRSIZ + 1];
+
+// Global settings to save stack space during recursion.
+static int g_flag_a = 0;
+static int g_flag_s = 0;
+
+// Helper to safely append a child name to path_buf.
+// Returns the previous length on success, or -1 if the path would exceed MAXPATH.
+static int
+append_path(const char *name)
+{
+  int old_len = strlen(path_buf);
+  int nlen = strlen(name);
+  int need_slash = (old_len > 0 && path_buf[old_len - 1] != '/');
+
+  if(old_len + need_slash + nlen + 1 > MAXPATH)
     return -1;
 
-  memmove(dst, prefix, plen);
   if(need_slash){
-    dst[plen] = '/';
-    plen++;
+    path_buf[old_len] = '/';
+    old_len++;
   }
-  memmove(dst + plen, name, nlen);
-  dst[plen + nlen] = '\0';
-  return 0;
+  memmove(path_buf + old_len, name, nlen);
+  path_buf[old_len + nlen] = '\0';
+  return old_len - need_slash;
 }
 
 // Recursively calculates disk usage using post-order traversal (children first, parent last).
-// - path: current directory path
 // - is_root: 1 if this is the initial path from command line, 0 for subdirectories
-// - flag_a: 1 to print all individual files alongside directories
-// - flag_s: 1 to summarize and print only the root path
 // Returns the total size in bytes of all files contained within this tree.
 static uint64
-du_dir(char *path, int is_root, int flag_a, int flag_s)
+du_dir(int is_root)
 {
-  int fd = open(path, O_RDONLY);
+  int fd = open(path_buf, O_RDONLY);
   if(fd < 0){
-    fprintf(2, "du: cannot open %s\n", path);
+    fprintf(2, "du: cannot open %s\n", path_buf);
     return 0;
   }
 
-  struct stat st;
-  if(fstat(fd, &st) < 0){
-    fprintf(2, "du: cannot stat %s\n", path);
+  if(fstat(fd, &g_st) < 0){
+    fprintf(2, "du: cannot stat %s\n", path_buf);
     close(fd);
     return 0;
   }
 
-  if(st.type != T_DIR){
+  if(g_st.type != T_DIR){
     close(fd);
     return 0;
   }
 
-  // Allocate on heap to avoid overflowing xv6's 8KB user stack during recursion
+  // Allocate on heap to avoid overflowing xv6's limited user stack during recursion
   struct entry_info *entries = malloc(sizeof(struct entry_info) * MAX_ENTRIES);
   if(!entries){
     fprintf(2, "du: out of memory\n");
@@ -71,34 +82,40 @@ du_dir(char *path, int is_root, int flag_a, int flag_s)
   }
 
   int count = 0;
-  struct dirent de;
-  char subpath[512];
+  int warned_overflow = 0;
 
   // Step 1: Read all valid entries in the directory
-  while(read(fd, &de, sizeof(de)) == sizeof(de)){
-    if(de.inum == 0)
+  while(read(fd, &g_de, sizeof(g_de)) == sizeof(g_de)){
+    if(g_de.inum == 0)
       continue; // Unused or deleted slot
 
     // Crucial: always skip "." and ".." to avoid infinite loops
-    if(strcmp(de.name, ".") == 0 || strcmp(de.name, "..") == 0)
+    if(strcmp(g_de.name, ".") == 0 || strcmp(g_de.name, "..") == 0)
       continue;
 
-    char name[DIRSIZ + 1];
-    memmove(name, de.name, DIRSIZ);
-    name[DIRSIZ] = '\0';
+    memmove(g_name, g_de.name, DIRSIZ);
+    g_name[DIRSIZ] = '\0';
 
-    if(join_path(subpath, sizeof(subpath), path, name) < 0)
+    int old_len = append_path(g_name);
+    if(old_len < 0){
+      fprintf(2, "du: path too long\n");
       continue;
+    }
 
-    struct stat subst;
-    if(stat(subpath, &subst) < 0)
+    int stat_res = stat(path_buf, &g_subst);
+    path_buf[old_len] = '\0'; // Restore parent path
+
+    if(stat_res < 0)
       continue;
 
     if(count < MAX_ENTRIES){
-      strcpy(entries[count].name, name);
-      entries[count].is_dir = (subst.type == T_DIR);
-      entries[count].size = subst.size;
+      strcpy(entries[count].name, g_name);
+      entries[count].is_dir = (g_subst.type == T_DIR);
+      entries[count].size = g_subst.size;
       count++;
+    } else if(!warned_overflow){
+      fprintf(2, "du: directory has > %d entries, truncating\n", MAX_ENTRIES);
+      warned_overflow = 1;
     }
   }
 
@@ -109,28 +126,31 @@ du_dir(char *path, int is_root, int flag_a, int flag_s)
   uint64 total_size = 0;
 
   for(int i = 0; i < count; i++){
-    if(join_path(subpath, sizeof(subpath), path, entries[i].name) < 0)
+    int old_len = append_path(entries[i].name);
+    if(old_len < 0)
       continue;
 
     if(entries[i].is_dir){
       // Recurse into subdirectory and aggregate its size
-      uint64 child_dir_size = du_dir(subpath, 0, flag_a, flag_s);
+      uint64 child_dir_size = du_dir(0);
       total_size += child_dir_size;
     } else {
       // Regular file: accumulate file size
       total_size += entries[i].size;
 
       // Print individual file when -a is set (and not in summary mode)
-      if(flag_a && !flag_s){
-        printf("%ld\t%s\n", entries[i].size, subpath);
+      if(g_flag_a && !g_flag_s){
+        printf("%ld\t%s\n", entries[i].size, path_buf);
       }
     }
+
+    path_buf[old_len] = '\0'; // Restore parent path
   }
 
   // Step 3: Print current directory size after all children have finished
   // In summary mode (-s), only print the root directory
-  if(!flag_s || is_root){
-    printf("%ld\t%s\n", total_size, path);
+  if(!g_flag_s || is_root){
+    printf("%ld\t%s\n", total_size, path_buf);
   }
 
   free(entries);
@@ -159,20 +179,28 @@ main(int argc, char *argv[])
     }
   }
 
+  if(strlen(path) >= MAXPATH){
+    fprintf(2, "du: path too long: %s\n", path);
+    exit(1);
+  }
+  strcpy(path_buf, path);
+
   struct stat st;
-  if(stat(path, &st) < 0){
-    fprintf(2, "du: cannot stat %s\n", path);
+  if(stat(path_buf, &st) < 0){
+    fprintf(2, "du: cannot stat %s\n", path_buf);
     exit(1);
   }
 
   // If the target is a regular file, simply print its size
   if(st.type != T_DIR){
-    printf("%ld\t%s\n", st.size, path);
+    printf("%ld\t%s\n", st.size, path_buf);
     exit(0);
   }
 
-  // Start calculating from root
-  du_dir(path, 1, flag_a, flag_s);
+  // Set global flags and start calculating from root
+  g_flag_a = flag_a;
+  g_flag_s = flag_s;
+  du_dir(1);
 
   exit(0);
 }
