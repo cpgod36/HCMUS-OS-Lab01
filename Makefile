@@ -196,6 +196,11 @@ UPROGS=\
 	$U/_zombie\
 	$U/_cp\
 	$U/_diff\
+	$U/_tree\
+	$U/_du\
+	$U/_sleep\
+	$U/_pingpong\
+	$U/_primes\
 
 
 
